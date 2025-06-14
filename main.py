@@ -1,59 +1,87 @@
-# main.py
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
+from flask import Flask, request, jsonify, send_file
 import yt_dlp
 import os
-from pydantic import BaseModel
 import uuid
-import shutil
+import subprocess
 
-app = FastAPI()
+app = Flask(__name__)
 
-class VideoRequest(BaseModel):
-    url: str
-    format: str = "best"
-    start: str = None
-    end: str = None
+DOWNLOAD_DIR = "/tmp"
 
-@app.post("/download")
-def download_video(data: VideoRequest):
-    uid = str(uuid.uuid4())
-    output_path = f"{uid}.%(ext)s"
+def download_video(url, format='best'):
     ydl_opts = {
-        "format": data.format,
-        "outtmpl": output_path,
-        "noplaylist": True,
+        'format': format,
+        'outtmpl': f'{DOWNLOAD_DIR}/%(id)s.%(ext)s',
+        'noplaylist': True,
     }
-
-    if data.start and data.end:
-        ydl_opts["postprocessor_args"] = [
-            "-ss", data.start,
-            "-to", data.end
-        ]
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.download([data.url])
+        info = ydl.extract_info(url, download=True)
+        file_path = ydl.prepare_filename(info)
+    return file_path, info
 
-    file_path = [f for f in os.listdir() if f.startswith(uid)][0]
-    response = FileResponse(file_path, filename=file_path)
-    return response
+@app.route('/download', methods=['POST'])
+def download():
+    data = request.json
+    url = data['url']
+    format = data.get('format', 'best')
+    try:
+        file_path, info = download_video(url, format)
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
-@app.get("/thumbnail")
-def download_thumbnail(url: str):
-    with yt_dlp.YoutubeDL({}) as ydl:
+@app.route('/mp3', methods=['POST'])
+def mp3():
+    data = request.json
+    url = data['url']
+    try:
+        file_path, info = download_video(url, 'bestaudio')
+        mp3_path = file_path.rsplit('.', 1)[0] + '.mp3'
+        subprocess.run(['ffmpeg', '-i', file_path, mp3_path])
+        return send_file(mp3_path, as_attachment=True)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/thumbnail', methods=['POST'])
+def thumbnail():
+    url = request.json['url']
+    with yt_dlp.YoutubeDL() as ydl:
         info = ydl.extract_info(url, download=False)
-        thumbnail_url = info.get("thumbnail", "")
-    return {"thumbnail": thumbnail_url}
+        thumbs = info.get('thumbnails', [])
+    return jsonify({'thumbnails': thumbs})
 
-@app.get("/tags")
-def get_tags(url: str):
-    with yt_dlp.YoutubeDL({}) as ydl:
+@app.route('/tags', methods=['POST'])
+def tags():
+    url = request.json['url']
+    with yt_dlp.YoutubeDL() as ydl:
         info = ydl.extract_info(url, download=False)
-        return {"tags": info.get("tags", [])}
+        return jsonify({'tags': info.get('tags', [])})
 
-@app.get("/playlist")
-def download_playlist(url: str):
-    ydl_opts = {"ignoreerrors": True}
+@app.route('/playlist', methods=['POST'])
+def playlist():
+    url = request.json['url']
+    ydl_opts = {'extract_flat': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(url, download=False)
-        return {"entries": [entry["webpage_url"] for entry in result["entries"] if entry]}
+        info = ydl.extract_info(url, download=False)
+        return jsonify({'entries': info.get('entries', [])})
+
+@app.route('/clip', methods=['POST'])
+def clip():
+    data = request.json
+    url = data['url']
+    start = data['start']
+    end = data['end']
+    try:
+        file_path, info = download_video(url)
+        output_path = file_path.rsplit('.', 1)[0] + '_clip.mp4'
+        subprocess.run(['ffmpeg', '-ss', start, '-to', end, '-i', file_path, '-c', 'copy', output_path])
+        return send_file(output_path, as_attachment=True)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/')
+def home():
+    return "YouTube Backend is running!"
+
+if __name__ == '__main__':
+    app.run()
