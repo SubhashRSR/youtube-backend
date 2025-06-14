@@ -1,5 +1,2 @@
-fastapi
-uvicorn
+flask
 yt-dlp
-ffmpeg-python
-python-multipart
